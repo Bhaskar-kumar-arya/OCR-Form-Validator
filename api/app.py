@@ -22,6 +22,8 @@ os.makedirs(app.config['SAVE_PATH'], exist_ok=True)
 processor = TrOCRProcessor.from_pretrained("microsoft/trocr-large-handwritten")
 model = VisionEncoderDecoderModel.from_pretrained("microsoft/trocr-large-handwritten")
 
+PADDING = 5  # pixels of padding around each bounding box
+
 
 @app.route('/process_image', methods=['POST'])
 def process_image():
@@ -62,7 +64,7 @@ def process_image():
                 processed_image_cv = binarized
                 app.logger.info("Preprocessing complete.")
 
-            # Convert processed_image_cv to BGR if it's grayscale, so we can draw colored boxes
+            # Convert processed_image_cv to BGR if it's grayscale
             if len(processed_image_cv.shape) == 2 or (len(processed_image_cv.shape) == 3 and processed_image_cv.shape[2] == 1):
                 visualized_image = cv2.cvtColor(processed_image_cv, cv2.COLOR_GRAY2BGR)
             else:
@@ -74,51 +76,87 @@ def process_image():
                 processed_temp_path = os.path.join(app.config['UPLOAD_FOLDER'], "processed_" + unique_filename)
                 cv2.imwrite(processed_temp_path, processed_image_cv)
                 prediction = crafter(processed_temp_path)
-                os.remove(processed_temp_path)  # Clean up the temporary processed image
+                os.remove(processed_temp_path)  # Clean up temporary processed image
             else:
                 prediction = crafter(temp_input_path)
             app.logger.info(f"Crafter text detection complete. Found {len(prediction['boxes'])} boxes.")
 
-            recognized_texts_and_boxes = []
+            # --- Group word boxes into line boxes ---
+            line_boxes = []
+            used = [False] * len(prediction['boxes'])
 
             for i, box in enumerate(prediction['boxes']):
-                # Ensure integer numpy array
-                box = np.array(box).astype(int)
+                if used[i]:
+                    continue
 
-                # Get bounding rectangle around the polygon
+                # Current box coordinates
+                box = np.array(box).astype(int)
                 x_min = np.min(box[:, 0])
                 y_min = np.min(box[:, 1])
                 x_max = np.max(box[:, 0])
                 y_max = np.max(box[:, 1])
 
-                # Crop safely within bounds
+                # Start a new line group
+                group_xmin, group_ymin, group_xmax, group_ymax = x_min, y_min, x_max, y_max
+                used[i] = True
+
+                for j, other_box in enumerate(prediction['boxes']):
+                    if used[j] or j == i:
+                        continue
+                    other = np.array(other_box).astype(int)
+                    ox_min, oy_min = np.min(other[:, 0]), np.min(other[:, 1])
+                    ox_max, oy_max = np.max(other[:, 0]), np.max(other[:, 1])
+
+                    # Check vertical overlap (same line)
+                    if not (oy_max < y_min or oy_min > y_max):
+                        group_xmin = min(group_xmin, ox_min)
+                        group_ymin = min(group_ymin, oy_min)
+                        group_xmax = max(group_xmax, ox_max)
+                        group_ymax = max(group_ymax, oy_max)
+                        used[j] = True
+
+                # Apply padding
+                group_xmin = max(0, group_xmin - PADDING)
+                group_ymin = max(0, group_ymin - PADDING)
+                group_xmax = min(processed_image_cv.shape[1], group_xmax + PADDING)
+                group_ymax = min(processed_image_cv.shape[0], group_ymax + PADDING)
+
+                line_boxes.append([group_xmin, group_ymin, group_xmax, group_ymax])
+
+            app.logger.info(f"Grouped into {len(line_boxes)} line boxes.")
+
+            recognized_texts_and_boxes = []
+
+            for i, (x_min, y_min, x_max, y_max) in enumerate(line_boxes):
                 cropped_image = processed_image_cv[y_min:y_max, x_min:x_max]
                 if cropped_image.size == 0:
-                    app.logger.warning(f"Skipping empty cropped image for box {i}.")
+                    app.logger.warning(f"Skipping empty cropped image for line box {i}.")
                     continue
 
-                # Convert cropped_image to 3 channels if it's grayscale
-                if len(cropped_image.shape) == 2 or (len(cropped_image.shape) == 3 and cropped_image.shape[2] == 1):
-                    cropped_image_display = cv2.cvtColor(cropped_image, cv2.COLOR_GRAY2BGR)
-                else:
-                    cropped_image_display = cropped_image.copy()
+                if len(cropped_image.shape) == 2:
+                    cropped_image = cv2.cvtColor(cropped_image, cv2.COLOR_GRAY2BGR)
 
-                cropped_image_pil = Image.fromarray(cropped_image_display)
+                cropped_image_pil = Image.fromarray(cropped_image)
 
                 # OCR with TrOCR
                 pixel_values = processor(images=cropped_image_pil, return_tensors="pt").pixel_values
-                generated_ids = model.generate(pixel_values, max_new_tokens=200, num_beams=5, early_stopping=True, no_repeat_ngram_size=3)
+                generated_ids = model.generate(
+                    pixel_values,
+                    max_new_tokens=200,
+                    num_beams=5,
+                    early_stopping=True,
+                    no_repeat_ngram_size=3
+                )
                 recognized_text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
-                app.logger.info(f"Box {i}: Recognized text: '{recognized_text}'")
+                app.logger.info(f"Line box {i}: Recognized text: '{recognized_text}'")
 
                 recognized_texts_and_boxes.append({
-                    "box": box.tolist(),
+                    "box": [int(x_min), int(y_min), int(x_max), int(y_max)],
                     "text": recognized_text
                 })
 
-                # Draw red bounding polygon
-                pts = box.reshape((-1, 1, 2))
-                cv2.polylines(visualized_image, [pts], isClosed=True, color=(0, 0, 255), thickness=2)
+                # Draw rectangle for line boxes
+                cv2.rectangle(visualized_image, (x_min, y_min), (x_max, y_max), (0, 0, 255), 2)
 
             app.logger.info("All text recognition complete. Saving visualized image...")
             # Save the visualized image temporarily
