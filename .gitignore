@@ -1,0 +1,76 @@
+# --------------------
+# Python-specific files
+# --------------------
+
+# Byte-compiled Python files
+__pycache__/
+*.py[cod]
+
+# Virtual environment directory
+ocr-env/
+
+# IDE-specific files (e.g., VS Code, PyCharm)
+.idea/
+.vscode/
+
+# Package installation
+# The virtual environment handles this, but it's good practice.
+# This prevents accidentally committing large dependency folders.
+# If you don't use a venv (not recommended), you may need to uncomment some of these.
+# venv/
+# env/
+# *.egg-info/
+# dist/
+# build/
+
+# --------------------
+# OS-specific files
+# --------------------
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# macOS
+.DS_Store
+
+# --------------------
+# Project-specific files and directories
+# --------------------
+
+# Hugging Face cache
+# This directory contains the downloaded models and is very large.
+# It should never be committed to Git.
+.cache/
+huggingface/
+*.bin
+api/trocr_model
+api/preprocessed_images
+preprocessed_images/
+temp_uploads/
+# Input and output data
+# These are temporary files and should not be version-controlled.
+# Create these directories if they don't exist, and add them here.
+data/
+input/
+output/
+ocr-env/
+
+# You can be more specific, e.g.,
+# input/scanned_documents/
+# output/json_results/
+
+# Log files
+*.log
+logs/
+
+# Any API keys or configuration files with sensitive info
+# You should use environment variables, but if you have a file, ignore it.
+.env
+config.yaml
+settings.py
+
+# Docker-specific files (if you containerize later)
+# .dockerignore should be used, but this is a good place to start.
+# !Dockerfile
+# !docker-compose.yml
