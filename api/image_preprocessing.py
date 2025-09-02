@@ -57,14 +57,21 @@ def deskew_image(image):
     coords = np.column_stack(np.where(thresh > 0))
 
     # Get the minimum area bounding rectangle
-    angle = cv2.minAreaRect(coords)[-1]
-
+    rect = cv2.minAreaRect(coords)
+    angle = rect[-1]
+    
+    # Ensure the angle is in the range [-45, 45]
     # The angle returned by minAreaRect is in the range [-90, 0)
-    # Adjust the angle to be positive if needed
-    if angle < -45:
-        angle = -(90 + angle)
-    else:
-        angle = -angle
+    # If the width is less than the height, it means the rectangle is "portrait"
+    # and the angle needs to be adjusted by 90 degrees.
+    if rect[1][0] < rect[1][1]: # if width < height
+        angle = 90 + angle
+
+    # Adjust the angle to be positive if needed, and within a reasonable range
+    if angle > 45:
+        angle = angle - 90
+    elif angle < -45:
+        angle = angle + 90
 
     # Rotate the image to deskew
     (h, w) = image.shape[:2]

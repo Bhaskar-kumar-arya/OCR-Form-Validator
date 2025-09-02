@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OCR Image Processor</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>OCR Image Processor</h1>
+        <form id="uploadForm" enctype="multipart/form-data">
+            <div class="form-group">
+                <label for="imageUpload">Upload Image:</label>
+                <input type="file" id="imageUpload" name="image" accept="image/*" required>
+            </div>
+
+            <h2>Preprocessing Settings</h2>
+            <div class="form-group checkbox-group">
+                <input type="checkbox" id="enablePreprocessing" name="enable_preprocessing" checked>
+                <label for="enablePreprocessing">Enable Preprocessing</label>
+            </div>
+            <div class="form-group checkbox-group">
+                <input type="checkbox" id="savePreprocessedImage" name="save_preprocessed_image" checked>
+                <label for="savePreprocessedImage">Save Preprocessed Image</label>
+            </div>
+            <div class="form-group">
+                <label for="padding">Padding (pixels):</label>
+                <input type="number" id="padding" name="padding" value="5" min="0">
+            </div>
+            <div class="form-group">
+                <label for="verticalThreshold">Vertical Overlap Threshold:</label>
+                <input type="number" id="verticalThreshold" name="vertical_threshold" value="0.3" step="0.01" min="0" max="1">
+            </div>
+
+            <h2>TrOCR Model Settings</h2>
+            <div class="form-group">
+                <label for="maxNewTokens">Max New Tokens:</label>
+                <input type="number" id="maxNewTokens" name="max_new_tokens" value="200" min="1">
+            </div>
+            <div class="form-group">
+                <label for="numBeams">Number of Beams:</label>
+                <input type="number" id="numBeams" name="num_beams" value="5" min="1">
+            </div>
+            <div class="form-group checkbox-group">
+                <input type="checkbox" id="earlyStopping" name="early_stopping" checked>
+                <label for="earlyStopping">Early Stopping</label>
+            </div>
+            <div class="form-group">
+                <label for="noRepeatNgramSize">No Repeat N-gram Size:</label>
+                <input type="number" id="noRepeatNgramSize" name="no_repeat_ngram_size" value="3" min="1">
+            </div>
+
+            <button type="submit">Process Image</button>
+        </form>
+
+        <div id="progress" class="progress-container">
+            <p>Status: <span id="statusText">Idle</span></p>
+            <div class="progress-bar-container">
+                <div class="progress-bar" id="progressBar"></div>
+            </div>
+        </div>
+
+        <div id="results" class="results-container">
+            <h2>Results</h2>
+            <div id="intermediatePreprocessedImageContainer">
+                <h3>Intermediate Preprocessed Image:</h3>
+                <img id="intermediatePreprocessedImage" src="" alt="Intermediate Preprocessed Image" style="display: none;">
+            </div>
+            <div id="preprocessedImageContainer">
+                <h3>Final Processed Image (with text boxes):</h3>
+                <img id="preprocessedImage" src="" alt="Preprocessed Image">
+            </div>
+            <div id="recognizedTextContainer">
+                <h3>Recognized Text:</h3>
+                <ul id="recognizedTextList"></ul>
+            </div>
+
+            <div id="logContainer" class="log-container">
+                <h3>Processing Logs:</h3>
+                <div id="logOutput" class="log-output"></div>
+            </div>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
