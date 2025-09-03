@@ -38,6 +38,75 @@ model = VisionEncoderDecoderModel.from_pretrained("microsoft/trocr-large-handwri
 
 PADDING = 5  # pixels of padding around each bounding box
 
+def resplit_words_to_boxes(words, boxes):
+    """
+    Assigns a list of OCR'd words to a list of bounding boxes based on relative widths.
+
+    Args:
+        words (list): A list of recognized word strings.
+        boxes (list): A list of original Crafter boxes (polygons), sorted by x-coordinate.
+
+    Returns:
+        list: A list of dictionaries, each containing a box and its assigned text.
+    """
+    if not words or not boxes:
+        return []
+
+    # Calculate total word characters (including spaces) and total width of all boxes
+    word_lengths = [len(w) for w in words]
+    total_word_length = sum(word_lengths) + max(0, len(words) - 1)
+    
+    box_widths = [np.max(np.array(b)[:, 0]) - np.min(np.array(b)[:, 0]) for b in boxes]
+    total_box_width = sum(box_widths)
+
+    if total_box_width == 0:
+        # Fallback for zero-width boxes: assign one word per box if possible
+        return [{'box': box, 'text': words[i] if i < len(words) else ""} for i, box in enumerate(boxes)]
+
+    assignments = []
+    word_cursor = 0
+    
+    # Assign words to each box except the last one
+    for i in range(len(boxes) - 1):
+        box = boxes[i]
+        box_width = box_widths[i]
+        
+        # Calculate the ideal number of characters this box should contain
+        ideal_chars = (box_width / total_box_width) * total_word_length
+        
+        best_num_words = 0
+        min_diff = float('inf')
+        
+        accumulated_chars = -1  # Start at -1 to account for no space before the first word
+        # Find the best number of words to assign to this box
+        for j in range(word_cursor, len(words)):
+            accumulated_chars += word_lengths[j] + 1
+            diff = abs(accumulated_chars - ideal_chars)
+            
+            if diff < min_diff:
+                min_diff = diff
+                best_num_words = j - word_cursor + 1
+            else:
+                # Difference started increasing, so the previous split was optimal
+                break
+        
+        # Ensure at least one word is assigned if words are left
+        if best_num_words == 0 and word_cursor < len(words):
+            best_num_words = 1
+            
+        assigned_words = words[word_cursor : word_cursor + best_num_words]
+        text = " ".join(assigned_words)
+        assignments.append({'box': box, 'text': text})
+        word_cursor += best_num_words
+        
+    # Assign all remaining words to the very last box
+    if word_cursor < len(words) or len(assignments) < len(boxes):
+        last_box = boxes[-1]
+        remaining_words = words[word_cursor:]
+        text = " ".join(remaining_words)
+        assignments.append({'box': last_box, 'text': text})
+        
+    return assignments
 
 @app.route('/')
 def serve_index():
@@ -143,7 +212,7 @@ def perform_ocr():
     # Get OCR parameters from request.json or use defaults
     save_preprocessed_image = request.json.get('save_preprocessed_image', True)
     padding = int(request.json.get('padding', PADDING))
-    vertical_threshold = float(request.json.get('vertical_threshold', 0.3))
+    vertical_threshold = float(request.json.get('vertical_threshold', 0.5))
     max_new_tokens = int(request.json.get('max_new_tokens', 200))
     num_beams = int(request.json.get('num_beams', 5))
     early_stopping = request.json.get('early_stopping', True)
@@ -153,109 +222,104 @@ def perform_ocr():
         processed_image_cv = load_image(preprocessed_image_path)
         app.logger.info(f"Preprocessed image loaded from {preprocessed_image_path}")
 
-        # Convert processed_image_cv to BGR if it's grayscale for visualization
-        if len(processed_image_cv.shape) == 2 or (len(processed_image_cv.shape) == 3 and processed_image_cv.shape[2] == 1):
-            visualized_image = cv2.cvtColor(processed_image_cv, cv2.COLOR_GRAY2BGR)
-        else:
-            visualized_image = processed_image_cv.copy()
+        visualized_image = cv2.cvtColor(processed_image_cv, cv2.COLOR_GRAY2BGR) if len(processed_image_cv.shape) == 2 else processed_image_cv.copy()
 
-        crafter = Crafter()  # Initialize Crafter
+        crafter = Crafter()
         app.logger.info("Crafter initialized for OCR.")
         
         app.logger.info("Performing text detection with Crafter...")
         prediction = crafter(preprocessed_image_path)
         app.logger.info(f"Crafter text detection complete. Found {len(prediction['boxes'])} boxes.")
 
-        # --- Group word boxes into line boxes ---
-        line_boxes = []
-        used = [False] * len(prediction['boxes'])
+        # --- Group word boxes into lines, preserving original boxes ---
+        line_groups = []
+        # Sort initial boxes by vertical position for stable, top-to-bottom processing
+        sorted_boxes = sorted(prediction['boxes'], key=lambda box: np.min(np.array(box)[:, 1]))
+        used = [False] * len(sorted_boxes)
 
-        for i, box in enumerate(prediction['boxes']):
-            if used[i]:
-                continue
+        for i, box in enumerate(sorted_boxes):
+            if used[i]: continue
 
-            # Current box coordinates
-            box = np.array(box).astype(int)
-            x_min = np.min(box[:, 0])
-            y_min = np.min(box[:, 1])
-            x_max = np.max(box[:, 0])
-            y_max = np.max(box[:, 1])
-
-            # Start a new line group
-            group_xmin, group_ymin, group_xmax, group_ymax = x_min, y_min, x_max, y_max
+            box_poly = np.array(box).astype(int)
+            y_min, y_max = np.min(box_poly[:, 1]), np.max(box_poly[:, 1])
+            
+            current_line_boxes = [box]
             used[i] = True
 
-            for j, other_box in enumerate(prediction['boxes']):
-                if used[j] or j == i:
-                    continue
-                other = np.array(other_box).astype(int)
-                ox_min, oy_min = np.min(other[:, 0]), np.min(other[:, 1])
-                ox_max, oy_max = np.max(other[:, 0]), np.max(other[:, 1])
+            for j, other_box in enumerate(sorted_boxes):
+                if used[j] or j == i: continue
+                
+                other_poly = np.array(other_box).astype(int)
+                oy_min, oy_max = np.min(other_poly[:, 1]), np.max(other_poly[:, 1])
 
-                # Check vertical overlap (same line)
                 box_height = y_max - y_min
-                other_height = oy_max - oy_min
-                avg_height = (box_height + other_height) / 2
-
-                # Allow overlap only if centers are close enough
-                if abs((oy_min + oy_max) / 2 - (y_min + y_max) / 2) < vertical_threshold * avg_height:
-                    group_xmin = min(group_xmin, ox_min)
-                    group_ymin = min(group_ymin, oy_min)
-                    group_xmax = max(group_xmax, ox_max)
-                    group_ymax = max(group_ymax, oy_max)
+                avg_height = (box_height + (oy_max - oy_min)) / 2
+                
+                # Check if vertical centers are closely aligned
+                if avg_height > 0 and abs(((oy_min + oy_max) / 2) - ((y_min + y_max) / 2)) < vertical_threshold * avg_height:
+                    current_line_boxes.append(other_box)
                     used[j] = True
 
+            # Sort the boxes within the line horizontally
+            current_line_boxes.sort(key=lambda b: np.min(np.array(b)[:, 0]))
+
+            # Calculate the merged bounding box for the entire line
+            all_points = np.vstack([np.array(b) for b in current_line_boxes])
+            group_xmin, group_ymin = np.min(all_points, axis=0)
+            group_xmax, group_ymax = np.max(all_points, axis=0)
+
             # Apply padding
-            group_xmin = max(0, group_xmin - padding)
-            group_ymin = max(0, group_ymin - padding)
-            group_xmax = min(processed_image_cv.shape[1], group_xmax + padding)
-            group_ymax = min(processed_image_cv.shape[0], group_ymax + padding)
+            merged_box = [
+                max(0, group_xmin - padding), max(0, group_ymin - padding),
+                min(processed_image_cv.shape[1], group_xmax + padding), min(processed_image_cv.shape[0], group_ymax + padding)
+            ]
 
-            line_boxes.append([group_xmin, group_ymin, group_xmax, group_ymax])
+            line_groups.append({"merged_box": merged_box, "constituent_boxes": current_line_boxes})
+        
+        app.logger.info(f"Grouped into {len(line_groups)} lines of text.")
 
-        app.logger.info(f"Grouped into {len(line_boxes)} line boxes.")
-
-        recognized_texts_and_boxes = []
-
-        for i, (x_min, y_min, x_max, y_max) in enumerate(line_boxes):
+        final_recognized_results = []
+        for i, group in enumerate(line_groups):
+            x_min, y_min, x_max, y_max = [int(c) for c in group['merged_box']]
+            
             cropped_image = processed_image_cv[y_min:y_max, x_min:x_max]
-            if cropped_image.size == 0:
-                app.logger.warning(f"Skipping empty cropped image for line box {i}.")
-                continue
+            if cropped_image.size == 0: continue
 
-            if len(cropped_image.shape) == 2:
-                cropped_image = cv2.cvtColor(cropped_image, cv2.COLOR_GRAY2BGR)
+            cropped_image_pil = Image.fromarray(cv2.cvtColor(cropped_image, cv2.COLOR_GRAY2RGB) if len(cropped_image.shape) == 2 else cropped_image)
 
-            cropped_image_pil = Image.fromarray(cropped_image)
-
-            # OCR with TrOCR
+            # OCR with TrOCR on the entire line
             pixel_values = processor(images=cropped_image_pil, return_tensors="pt").pixel_values
-            generated_ids = model.generate(
-                pixel_values,
-                max_new_tokens=max_new_tokens,
-                num_beams=num_beams,
-                early_stopping=early_stopping,
-                no_repeat_ngram_size=no_repeat_ngram_size
-            )
+            generated_ids = model.generate(pixel_values, max_new_tokens=max_new_tokens, num_beams=num_beams, early_stopping=early_stopping, no_repeat_ngram_size=no_repeat_ngram_size)
             recognized_text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
-            app.logger.info(f"Line box {i}: Recognized text: '{recognized_text}'")
+            
+            app.logger.info(f"Line {i} OCR: '{recognized_text}'")
 
-            recognized_texts_and_boxes.append({
-                "box": [int(x_min), int(y_min), int(x_max), int(y_max)],
-                "text": recognized_text
-            })
-
-            # Draw rectangle for line boxes
+            # --- Resplit recognized words back to their original boxes ---
+            words = recognized_text.split()
+            constituent_boxes = group['constituent_boxes']
+            
+            if words:
+                app.logger.info(f"Resplitting '{recognized_text}' among {len(constituent_boxes)} boxes for line {i}.")
+                resplit_assignments = resplit_words_to_boxes(words, constituent_boxes)
+                for assignment in resplit_assignments:
+                    app.logger.info(f"  - Mapped text: '{assignment['text']}'")
+                final_recognized_results.extend(resplit_assignments)
+        
+        # Prepare final data for JSON response and visualization
+        response_texts_and_boxes = []
+        for item in final_recognized_results:
+            box_poly = np.array(item['box']).astype(int)
+            x_min, y_min = np.min(box_poly, axis=0)
+            x_max, y_max = np.max(box_poly, axis=0)
+            
+            response_texts_and_boxes.append({"box": [int(x_min), int(y_min), int(x_max), int(y_max)], "text": item['text']})
             cv2.rectangle(visualized_image, (x_min, y_min), (x_max, y_max), (0, 0, 255), 2)
 
-        app.logger.info("All text recognition complete. Saving visualized image...")
-        # Save the visualized image temporarily
+        app.logger.info("All text recognition and re-splitting complete. Saving visualized image...")
         final_processed_filename = "final_processed_" + preprocessed_image_id
         temp_output_path = os.path.join(app.config['UPLOAD_FOLDER'], final_processed_filename)
         cv2.imwrite(temp_output_path, visualized_image)
-        app.logger.info(f"Visualized image saved temporarily to {temp_output_path}")
-
-        # Conditionally save the visualized image to a persistent location
+        
         saved_path = None
         if save_preprocessed_image:
             persistent_filename = "processed_" + preprocessed_image_id
@@ -264,41 +328,31 @@ def perform_ocr():
             app.logger.info(f"Visualized image saved persistently to {saved_path}")
 
         app.logger.info("Encoding visualized image to base64...")
-        # Encode the visualized image to base64
         _, buffer = cv2.imencode('.png', visualized_image)
         final_processed_image_base64 = base64.b64encode(buffer).decode('utf-8')
-        app.logger.info("Image encoded to base64.")
 
         response_data = {
             "status": "success",
             "message": "OCR processed successfully",
             "preprocessed_image_base64": final_processed_image_base64,
-            "recognized_texts_and_boxes": recognized_texts_and_boxes
+            "recognized_texts_and_boxes": response_texts_and_boxes
         }
         if saved_path:
             response_data["saved_image_path"] = saved_path
-        
+            
         app.logger.info("Returning success response.")
         return jsonify(response_data)
 
-    except FileNotFoundError as e:
-        app.logger.error(f"File not found error: {str(e)}")
-        return jsonify({"error": str(e)}), 404
     except Exception as e:
         app.logger.exception(f"OCR failed: {str(e)}")
         return jsonify({"error": f"OCR failed: {str(e)}"}), 500
     finally:
-        # Clean up temporary preprocessed file
+        if 'temp_output_path' in locals() and temp_output_path and os.path.exists(temp_output_path):
+            os.remove(temp_output_path)
+            app.logger.info(f"Cleaned up temporary output file: {temp_output_path}")
         if preprocessed_image_path and os.path.exists(preprocessed_image_path):
             os.remove(preprocessed_image_path)
             app.logger.info(f"Cleaned up temporary preprocessed file: {preprocessed_image_path}")
-        if temp_output_path and os.path.exists(temp_output_path):
-            os.remove(temp_output_path)
-            app.logger.info(f"Cleaned up temporary output file: {temp_output_path}")
-
-    app.logger.error("Unknown error during file upload.")
-    return jsonify({"error": "Unknown error during file upload"}), 500
-
 
 if __name__ == '__main__':
     app.run(debug=True)
