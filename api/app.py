@@ -11,7 +11,7 @@ import logging
 import queue
 import json
 import time
-
+from key_value_extractor import extract_key_value_pairs
 from image_preprocessing import load_image, grayscale_image, denoise_image, binarize_image, deskew_image
 
 app = Flask(__name__, static_folder='../frontend', static_url_path='/')
@@ -292,6 +292,10 @@ def perform_ocr():
             generated_ids = model.generate(pixel_values, max_new_tokens=max_new_tokens, num_beams=num_beams, early_stopping=early_stopping, no_repeat_ngram_size=no_repeat_ngram_size)
             recognized_text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
             
+            # Store full line text and index in the group for the extractor
+            group['line_text'] = recognized_text
+            group['line_idx'] = i
+            
             app.logger.info(f"Line {i} OCR: '{recognized_text}'")
 
             # --- Resplit recognized words back to their original boxes ---
@@ -299,10 +303,10 @@ def perform_ocr():
             constituent_boxes = group['constituent_boxes']
             
             if words:
-                app.logger.info(f"Resplitting '{recognized_text}' among {len(constituent_boxes)} boxes for line {i}.")
                 resplit_assignments = resplit_words_to_boxes(words, constituent_boxes)
+                # Add line index to each resplit box for tracking
                 for assignment in resplit_assignments:
-                    app.logger.info(f"  - Mapped text: '{assignment['text']}'")
+                    assignment['line_idx'] = i
                 final_recognized_results.extend(resplit_assignments)
         
         # Prepare final data for JSON response and visualization
@@ -312,8 +316,15 @@ def perform_ocr():
             x_min, y_min = np.min(box_poly, axis=0)
             x_max, y_max = np.max(box_poly, axis=0)
             
+            # This data is sent to the frontend for rendering boxes
             response_texts_and_boxes.append({"box": [int(x_min), int(y_min), int(x_max), int(y_max)], "text": item['text']})
             cv2.rectangle(visualized_image, (x_min, y_min), (x_max, y_max), (0, 0, 255), 2)
+
+        # --- CALL THE KEY-VALUE EXTRACTOR ---
+        app.logger.info("Extracting key-value pairs...")
+        # Note: final_recognized_results has been modified in the loop to include 'line_idx'
+        structured_data = extract_key_value_pairs(line_groups, final_recognized_results)
+        app.logger.info(f"Extraction complete: {structured_data}")
 
         app.logger.info("All text recognition and re-splitting complete. Saving visualized image...")
         final_processed_filename = "final_processed_" + preprocessed_image_id
@@ -335,7 +346,8 @@ def perform_ocr():
             "status": "success",
             "message": "OCR processed successfully",
             "preprocessed_image_base64": final_processed_image_base64,
-            "recognized_texts_and_boxes": response_texts_and_boxes
+            "recognized_texts_and_boxes": response_texts_and_boxes,
+            "structured_data": structured_data  # Add the new data to the response
         }
         if saved_path:
             response_data["saved_image_path"] = saved_path
@@ -353,6 +365,7 @@ def perform_ocr():
         if preprocessed_image_path and os.path.exists(preprocessed_image_path):
             os.remove(preprocessed_image_path)
             app.logger.info(f"Cleaned up temporary preprocessed file: {preprocessed_image_path}")
+            
 
 if __name__ == '__main__':
     app.run(debug=True)
